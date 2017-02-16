@@ -7,6 +7,8 @@
 // http://www.boost.org/LICENSE_1_0.txt)
 //
 
+#include <unordered_map>
+
 #include <QDomDocument>
 #include <QTextStream>
 #include <QFile>
@@ -230,7 +232,245 @@ namespace Graph
 
   }
 
-  Graph::Graph()
+  class Selection
+  {
+    public:
+      const std::vector<size_t>& nodes;
+      const std::vector<size_t>& edges;
+    private:
+      struct Node
+      {
+        size_t id;    // index in the complete node list
+        size_t index; // index in the selected node list
+        size_t outdepth;
+        size_t indepth;
+        std::vector<size_t> inEdges, outEdges; // by edge id
+        size_t count;
+        Node()=default;
+      };
+
+      struct Edge
+      {
+        size_t id;    // index in the complete edge list
+        size_t index; // index in the selected edge list
+        size_t count;
+        bool bridge;
+        Edge()=default;
+      };
+
+      detail::GraphImplBase* m_impl;
+
+      // maps node/edge indices to selection Node/Edge objects
+      std::unordered_map<size_t,Node> m_nodes;
+      std::unordered_map<size_t,Edge> m_edges;
+      // keeps track of node/edge indices in selection
+      std::vector<size_t> m_nodeIndices;
+      std::vector<size_t> m_edgeIndices;
+
+      void repositionNode(const Node& node)
+      {
+        // Center the first node placed
+        if (m_nodeIndices.size() == 1)
+        {
+          m_impl->nodes[node.id].pos() = Coord3D(0.0, 0.0, 0.0);
+          return;
+        }
+
+        Coord3D centroid;
+        size_t count = 0;
+        for (size_t i = 0; i < node.inEdges.size(); ++i)
+        {
+          ::Graph::Edge& edge = m_impl->edges[node.inEdges[i]];
+          if (m_nodes.count(edge.from()))
+          {
+            centroid += m_impl->nodes[edge.from()].pos();
+            ++count;
+          }
+        }
+        for (size_t i = 0; i < node.outEdges.size(); ++i)
+        {
+          ::Graph::Edge& edge = m_impl->edges[node.outEdges[i]];
+          if (m_nodes.count(edge.to()))
+          {
+            centroid += m_impl->nodes[edge.to()].pos();
+            ++count;
+          }
+        }
+
+        if (count)
+        {
+          Coord3D rvec = Coord3D(detail::frand(-1.0, 1.0),
+            detail::frand(-1.0, 1.0), detail::frand(-1.0, 1.0));
+          rvec *= 50.0 / rvec.size();
+          m_impl->nodes[node.id].pos() = centroid / ((GLfloat) count) + rvec;
+        }
+      }
+
+      void repositionEdge(size_t edgeId)
+      {
+        Coord3D pos1 = m_impl->nodes[m_impl->edges[edgeId].from()].pos();
+        Coord3D pos2 = m_impl->nodes[m_impl->edges[edgeId].to()].pos();
+        Coord3D center = (pos1 + pos2) / 2.0;
+        m_impl->handles[edgeId].pos() = center;
+        m_impl->transitionLabelnodes[edgeId].pos() = center;
+      }
+
+      // creates, and increases count for node
+      Node& increaseNode(size_t nodeId)
+      {
+        if (m_nodes.count(nodeId))
+        {
+          Node& node = m_nodes[nodeId];
+          ++node.count;
+          return node;
+        }
+
+        Node& node = m_nodes[nodeId];
+        node.id = nodeId;
+        node.index = m_nodeIndices.size();
+        m_nodeIndices.push_back(nodeId);
+
+        for (size_t i = 0; i < m_impl->edges.size(); ++i)
+        {
+          ::Graph::Edge& edge = m_impl->edges[i];
+          if (edge.from() == nodeId)
+            node.outEdges.push_back(i);
+          if (edge.to() == nodeId)
+            node.inEdges.push_back(i);
+        }
+
+        node.count = 1;
+
+        repositionNode(node);
+        return node;
+      }
+
+      // creates, and increases count for edge
+      Edge& increaseEdge(size_t edgeId)
+      {
+        if (m_edges.count(edgeId))
+        {
+          Edge& edge = m_edges[edgeId];
+          ++edge.count;
+          return edge;
+        }
+        
+        Edge& edge = m_edges[edgeId];
+        edge.id = edgeId;
+        edge.index = m_edgeIndices.size();
+        m_edgeIndices.push_back(edgeId);
+
+        edge.count = 1;
+
+        repositionEdge(edgeId);
+        return edge;
+      }
+
+      // decreases selection count for node, and purges
+      void decreaseNode(size_t nodeId)
+      {
+        if (!m_nodes.count(nodeId))
+          return;
+
+        Node& node = m_nodes[nodeId];
+        if (--node.count < 1)
+        {
+          size_t last = m_nodeIndices.size() - 1;
+          if (node.index < last)
+          {
+            size_t lastId = m_nodeIndices[last];
+            m_nodeIndices[node.index] = lastId;
+            m_nodes[lastId].index = node.index;
+          }
+          m_nodeIndices.pop_back();
+          m_nodes.erase(nodeId);
+        }
+      }
+
+      // decreases selection count for edge, and purges
+      void decreaseEdge(size_t edgeId)
+      {
+        if (!m_edges.count(edgeId))
+          return;
+
+        Edge& edge = m_edges[edgeId];
+        if (--edge.count < 1)
+        {
+          size_t last = m_edgeIndices.size() - 1;
+          if (edge.index < last)
+          {
+            size_t lastId = m_edgeIndices[last];
+            m_edgeIndices[edge.index] = lastId;
+            m_edges[lastId].index = edge.index;
+          }
+          m_edgeIndices.pop_back();
+          m_edges.erase(edgeId);
+        }
+      }
+
+      void updateBridges()
+      {
+        // Todo: implement
+      }
+
+    public:
+      Selection(detail::GraphImplBase* impl)
+        : nodes(m_nodeIndices), edges(m_edgeIndices), m_impl(impl) {}
+
+      // expand outgoing transitions and states for specified node
+      void expand(size_t nodeId)
+      {
+        Node& node = increaseNode(nodeId);
+        for (size_t i = 0; i < node.outEdges.size(); ++i)
+        {
+          size_t edgeId = node.outEdges[i];
+          increaseNode(m_impl->edges[edgeId].to());
+          increaseEdge(edgeId);
+        }
+        updateBridges();
+      }
+
+      // contract outgoing transitions and states for specified node
+      void contract(size_t nodeId)
+      {
+        if (m_nodes.count(nodeId) != 0)
+        {
+          Node& node = m_nodes[nodeId];
+          for (size_t i = 0; i < node.outEdges.size(); ++i)
+          {
+            size_t edgeId = node.outEdges[i];
+            decreaseEdge(edgeId);
+            decreaseNode(m_impl->edges[edgeId].to());
+          }
+        }
+        decreaseNode(nodeId);
+        updateBridges();
+      }
+
+      // tells whether a node when contracted would leave unconnected components
+      bool isBridge(size_t nodeId)
+      {
+        if (!m_nodes.count(nodeId))
+          return false;
+
+        // If one of the out-edges is a bridge and would unselect: true
+        /*Node &node = m_nodes[nodeId];
+        for (size_t i = 0; i < node.outEdges.size(); ++i)
+        {
+          size_t edgeId = node.outEdges[i];
+          if (m_edges.count(edgeId) != 0)
+          {
+            Edge &edge = m_edges[edgeId];
+            if (edge.bridge && edge.count <= 1)
+              return true;
+          }
+        }*/
+
+        return false;
+      }
+  };
+
+  Graph::Graph() : m_sel(nullptr), m_lock(QReadWriteLock::Recursive)
   {
     m_type = mcrl2::lts::lts_lts;
     m_impl = new detail::GraphImpl<mcrl2::lts::probabilistic_lts_lts_t>;
@@ -240,6 +480,11 @@ namespace Graph
   Graph::~Graph()
   {
     delete m_impl;
+    if (m_sel != nullptr)
+    {
+      delete m_sel;
+      m_sel = nullptr;
+    }
   }
 
   size_t Graph::edgeCount() const
@@ -299,14 +544,25 @@ namespace Graph
 
   void Graph::load(const QString &filename, const Coord3D& min, const Coord3D& max)
   {
+    m_lock.lockForWrite();
+
     mcrl2::lts::lts_type guess = mcrl2::lts::detail::guess_format(filename.toUtf8().constData());
     delete m_impl;
     createImpl(guess);
     m_impl->load(filename, min, max);
+    if (m_sel != nullptr)
+    {
+      delete m_sel;
+      m_sel = nullptr;
+    }
+
+    m_lock.unlock();
   }
 
   void Graph::loadXML(const QString& filename)
   {
+    m_lock.lockForWrite();
+
     QDomDocument xml;
     QFile file(filename);
     if(!file.open( QFile::ReadOnly ))
@@ -415,10 +671,19 @@ namespace Graph
       node = node.nextSibling();
     }
 
+    if (m_sel != nullptr)
+    {
+      delete m_sel;
+      m_sel = nullptr;
+    }
+
+    m_lock.unlock();
   }
 
   void Graph::saveXML(const QString& filename)
   {
+    m_lock.lockForRead();
+
     QDomDocument xml;
     QDomElement root = xml.createElement("Graph");
     root.setAttribute("type", (int)m_type);
@@ -502,6 +767,10 @@ namespace Graph
         QTextStream out(&data);
         xml.save(out, 2);
     }
+
+    // Todo: Perhaps save selection too
+
+    m_lock.unlock();
   }
 
   Edge Graph::edge(size_t index) const
@@ -553,4 +822,120 @@ namespace Graph
       it->pos().clip(min, max);
   }
 
+  void Graph::lock()
+  {
+    m_lock.lockForRead();
+  }
+
+  void Graph::unlock()
+  {
+    m_lock.unlock();
+  }
+
+  void Graph::makeSelection()
+  {
+    m_lock.lockForWrite();
+
+    if (m_sel != nullptr)
+    {
+      delete m_sel;
+    }
+    m_sel = new Selection(m_impl);
+
+    m_lock.unlock();
+  }
+
+  void Graph::discardSelection()
+  {
+    m_lock.lockForWrite();
+
+    if (m_sel != nullptr)
+    {
+      delete m_sel;
+      m_sel = nullptr;
+    }
+
+    // Deactive all nodes
+    for (std::vector<NodeNode>::iterator it = m_impl->nodes.begin(); it != m_impl->nodes.end(); ++it)
+      it->m_active = false;
+
+    m_lock.unlock();
+  }
+
+  void Graph::toggleActive(size_t index)
+  {
+    m_lock.lockForWrite(); // enter critical section
+
+    if (m_sel != nullptr && index < m_impl->nodes.size())
+    {
+      NodeNode& node = m_impl->nodes[index];
+      if (node.m_active)
+      {
+        m_sel->contract(index);
+      }
+      else
+      {
+        m_sel->expand(index);
+      }
+      node.m_active = !node.m_active;
+    }
+
+    m_lock.unlock(); // exit critical section
+  }
+
+  bool Graph::isToggleable(size_t index)
+  {
+    if (m_sel == nullptr || index >= m_impl->nodes.size())
+      return false;
+
+    m_lock.lockForRead();
+
+    // active node count:
+    size_t count = 0;
+    for (size_t i = 0; i < m_sel->nodes.size(); ++i)
+      if (m_impl->nodes[m_sel->nodes[i]].m_active)
+        ++count;
+    
+    NodeNode& node = m_impl->nodes[index];
+    bool toggleable = !node.m_active || (!m_sel->isBridge(index) && count > 1);
+
+    m_lock.unlock();
+
+    return toggleable;
+  }
+
+  bool Graph::isBridge(size_t index) const
+  {
+    return m_sel->isBridge(index);
+  }
+
+  bool Graph::hasSelection() const
+  {
+    return m_sel != nullptr;
+  }
+
+  size_t Graph::selectionEdge(size_t index) const
+  {
+    return m_sel->edges[index];
+  }
+
+  size_t Graph::selectionNode(size_t index) const
+  {
+    return m_sel->nodes[index];
+  }
+
+  size_t Graph::selectionEdgeCount() const
+  {
+    if (m_sel == nullptr)
+      return 0;
+    return m_sel->edges.size();
+  }
+
+  size_t Graph::selectionNodeCount() const
+  {
+    if (m_sel == nullptr)
+      return 0;
+    return m_sel->nodes.size();
+  }
+  
 }

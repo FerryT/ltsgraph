@@ -59,6 +59,16 @@ struct Color3f
     operator const GLfloat*() const { return &r; }
 };
 
+struct Color4f
+{
+  GLfloat r, g, b, a;
+  Color4f() {}
+  Color4f(GLfloat r, GLfloat g, GLfloat b, GLfloat a) : r(r), g(g), b(b), a(a) {}
+  Color4f(const Color3f &c, GLfloat a = 1.0) : r(c.r), g(c.g), b(c.b), a(a) {}
+  Color4f(GLfloat* c) : r(c[0]), g(c[1]), b(c[2]), a(c[3]) {}
+  operator const GLfloat*() const { return &r; }
+};
+
 struct TextureData 
 {
     size_t* transition_widths;
@@ -143,10 +153,12 @@ struct TextureData
 
     }
 
-    void generate(const Graph::Graph& g)
+    void generate(Graph::Graph& g)
     {
       assert(glGetError() == 0);
       QFont font;
+
+      g.lock(); // enter critical section
 
       glDeleteTextures(transition_count, transition_textures);
       delete[] transition_widths;
@@ -199,6 +211,8 @@ struct TextureData
         createTexture(font, QString::number(i), number_textures[i], &number_widths[i], &number_heights[i]);
         assert(glGetError() == 0);
       }
+
+      g.unlock(); // exit critical section
 
     }
 };
@@ -590,7 +604,7 @@ void drawHandle(const VertexData& data, const Color3f& line, const Color3f& fill
 }
 
 inline
-void drawNode(const VertexData& data, const Color3f& line, const Color3f& fill, bool mark)
+void drawNode(const VertexData& data, const Color3f& line, const Color3f& fill, bool mark, bool translucent)
 {
   glPushAttrib(GL_LINE_BIT);
   if (mark)
@@ -603,10 +617,32 @@ void drawNode(const VertexData& data, const Color3f& line, const Color3f& fill, 
     glLineWidth(2.0);
     gl2psLineWidth(0.25);
   }
+  
   glVertexPointer(3, GL_FLOAT, 0, data.node);
-  glColor3fv(fill);   glDrawArrays(GL_TRIANGLE_STRIP, RES_NODE_SLICE - 1, RES_NODE_SLICE * RES_NODE_STACK * 2);
+  if (translucent)
+  {
+    Color4f fill2(fill, .15);
+    glColor4fv(fill2);
+  }
+  else
+  {
+    glColor3fv(fill);
+  }
+  glDrawArrays(GL_TRIANGLE_STRIP, RES_NODE_SLICE - 1, RES_NODE_SLICE * RES_NODE_STACK * 2);
+  
   glDepthMask(GL_FALSE);
-  glColor3fv(line);   glDrawArrays(GL_LINE_LOOP, 0, RES_NODE_SLICE - 1);
+  
+  if (translucent)
+  {
+    Color4f line2(line, .15);
+    glColor4fv(line2);
+  }
+  else
+  {
+    glColor3fv(line);
+  }
+  glDrawArrays(GL_LINE_LOOP, 0, RES_NODE_SLICE - 1);
+  
   glDepthMask(GL_TRUE);
   glPopAttrib();
   gl2psLineWidth(0.25);
@@ -749,29 +785,32 @@ void GLScene::renderNode(GLuint i)
 {
   Graph::NodeNode& node = m_graph.node(i);
   Color3f fill;
-  Color3f line(node.color());
+  Color3f line;
+
+  // Node stroke color: red when selected, black otherwise
+  line = Color3f(0.6f * node.selected(), 0.0f, 0.0f);
 
   bool mark = (m_graph.initialState() == i) && m_drawinitialmarking;
-  if (mark) // Initial node (green or dark green) => selected (red or darker red)
+  if (mark) // Initial node fill color: green or dark green (locked)
   {
     if (node.locked())
-      fill = Color3f(0.1f + 0.9f * node.selected(), 0.7f - 0.4f * node.selected(),  0.1f + 0.2f * node.selected() );
+      fill = Color3f(0.1f, 0.7f, 0.1f);
     else
-      fill = Color3f(0.1f + 0.9f * node.selected(), 1.0f - 0.5f * node.selected(),  0.1f + 0.4f * node.selected() );
+      fill = Color3f(0.1f, 1.0f, 0.1f);
   }
-  else // Normal node (white or gray) => selected (red or darker red)
+  else // Normal node fill color: node color or darkened node color (locked)
   {
     if (node.locked())
-      fill = Color3f(0.7f + 0.3f * node.selected(), 0.7f - 0.2f * node.selected(),  0.7f - 0.2f * node.selected() );
+      fill = Color3f(0.7f * node.color()[0], 0.7f * node.color()[1], 0.7f * node.color()[2]);
     else
-      fill = Color3f(1.0f,                        1.0f - 0.3f * node.selected(),  1.0f - 0.3f * node.selected() );
+      fill = node.color();
   }
 
   glStartName(so_node, i);
   glPushMatrix();
 
   m_camera->billboard_spherical(node.pos());
-  drawNode(*m_vertexdata, line, fill, mark);
+  drawNode(*m_vertexdata, line, fill, mark, m_graph.hasSelection() && !node.active());
 
   glPopMatrix();
   glEndName();
@@ -976,32 +1015,52 @@ void GLScene::render()
 
   glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-  for (size_t i = 0; i < m_graph.nodeCount(); ++i)
+  m_graph.lock(); // enter critical section
+
+  if (m_graph.hasSelection())
   {
-    renderNode(i);
+    for (size_t i = 0; i < m_graph.selectionNodeCount(); ++i)
+    {
+      renderNode(m_graph.selectionNode(i));
+    }
+    for (size_t i = 0; i < m_graph.selectionEdgeCount(); ++i)
+    {
+      renderEdge(m_graph.selectionEdge(i));
+    }
   }
-  for (size_t i = 0; i < m_graph.edgeCount(); ++i)
+
+  bool sel = m_graph.hasSelection();
+  size_t nodeCount = sel ? m_graph.selectionNodeCount() : m_graph.nodeCount();
+  size_t edgeCount = sel ? m_graph.selectionEdgeCount() : m_graph.edgeCount();
+
+  for (size_t i = 0; i < nodeCount; ++i)
   {
-    renderEdge(i);
+    renderNode(sel ? m_graph.selectionNode(i) : i);
+  }
+  for (size_t i = 0; i < edgeCount; ++i)
+  {
+    renderEdge(sel ? m_graph.selectionEdge(i) : i);
   }
 
   glEnableClientState(GL_TEXTURE_COORD_ARRAY);
   glDepthMask(GL_FALSE);
-  for (size_t i = 0; i < m_graph.nodeCount(); ++i)
+  for (size_t i = 0; i < nodeCount; ++i)
   {
     if (m_drawstatenumbers)
-      renderStateNumber(i);
+      renderStateNumber(sel ? m_graph.selectionNode(i) : i);
     if (m_drawstatelabels)
-      renderStateLabel(i);
+      renderStateLabel(sel ? m_graph.selectionNode(i) : i);
   }
-  for (size_t i = 0; i < m_graph.edgeCount(); ++i)
+  for (size_t i = 0; i < edgeCount; ++i)
   {
     if (m_drawtransitionlabels)
-      renderTransitionLabel(i);
-    renderHandle(i);
+      renderTransitionLabel(sel ? m_graph.selectionEdge(i) : i);
+    renderHandle(sel ? m_graph.selectionEdge(i) : i);
   }
   glDepthMask(GL_TRUE);
   glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+
+  m_graph.unlock(); // exit critical section
 }
 
 void GLScene::resize(size_t width, size_t height)
@@ -1202,16 +1261,23 @@ void GLScene::renderLatexGraphics(QString filename, float aspectRatio)
   tikz_code += "   \\tikzstyle{initstate}=[state,fill=green]\n";
   tikz_code += "   \\tikzstyle{transition}=[->,>=stealth']\n";
 
+  m_graph.lock();
 
-  for (size_t i = 0; i < m_graph.nodeCount(); ++i)
+  bool sel = m_graph.hasSelection();
+  size_t nodeCount = sel ? m_graph.selectionNodeCount() : m_graph.nodeCount();
+  size_t edgeCount = sel ? m_graph.selectionEdgeCount() : m_graph.edgeCount();
+
+  for (size_t i = 0; i < nodeCount; ++i)
   {
-    tikz_code += tikzNode(i, aspectRatio);
+    tikz_code += tikzNode(sel ? m_graph.selectionNode(i) : i, aspectRatio);
   }
 
-  for (size_t i = 0; i < m_graph.edgeCount(); ++i)
+  for (size_t i = 0; i < edgeCount; ++i)
   {
-    tikz_code += tikzEdge(i, aspectRatio);
+    tikz_code += tikzEdge(sel ? m_graph.selectionEdge(i) : i, aspectRatio);
   }
+
+  m_graph.unlock();
 
   tikz_code += "\n\\end{tikzpicture}\n";
   tikz_code += "\\end{document}\n";

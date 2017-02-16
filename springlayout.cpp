@@ -23,7 +23,11 @@ namespace Graph
 
   inline float frand(float min, float max)
   {
-    return ((float)qrand() / RAND_MAX) * (max - min) + min;
+    //return ((float)qrand() / RAND_MAX) * (max - min) + min;
+    // Fast pseudo rand, source: http://www.musicdsp.org/showone.php?id=273
+    static int32_t seed = 1;
+    seed *= 16807;
+    return ((((float)seed) * 4.6566129e-010f) + 1.0) * (max - min) / 2.0 + min;
   }
 
   inline float cube(float x)
@@ -114,16 +118,26 @@ namespace Graph
 
   void SpringLayout::apply()
   {
-    m_nforces.resize(m_graph.nodeCount());
+    m_graph.lock(); // enter critical section
+
+    bool sel = m_graph.hasSelection();
+    size_t nodeCount = sel ? m_graph.selectionNodeCount() : m_graph.nodeCount();
+    size_t edgeCount = sel ? m_graph.selectionEdgeCount() : m_graph.edgeCount();
+
+    m_nforces.resize(m_graph.nodeCount()); // Todo: compact this
     m_hforces.resize(m_graph.edgeCount());
     m_lforces.resize(m_graph.edgeCount());
     m_sforces.resize(m_graph.nodeCount());
 
-    for (size_t n = 0; n < m_graph.nodeCount(); ++n)
+    for (size_t i = 0; i < nodeCount; ++i)
     {
+      size_t n = sel ? m_graph.selectionNode(i) : i;
+
       m_nforces[n] = Coord3D(0, 0, 0);
-      for (size_t m = 0; m < n; ++m)
+      for (size_t j = 0; j < i; ++j)
       {
+        size_t m = sel ? m_graph.selectionNode(j) : j;
+
         Coord3D diff = repulsionForce(m_graph.node(n).pos(), m_graph.node(m).pos(), m_repulsion, m_natLength);
         m_nforces[n] += diff;
         m_nforces[m] -= diff;
@@ -131,8 +145,10 @@ namespace Graph
       m_sforces[n] = (this->*m_forceCalculation)(m_graph.node(n).pos(), m_graph.stateLabel(n).pos(), 0.0);
     }
 
-    for (size_t n = 0; n < m_graph.edgeCount(); ++n)
+    for (size_t i = 0; i < edgeCount; ++i)
     {
+      size_t n = sel ? m_graph.selectionEdge(i) : i;
+
       Edge e = m_graph.edge(n);
       Coord3D f;
       // Variables for repulsion calculations
@@ -155,8 +171,10 @@ namespace Graph
       f = (this->*m_forceCalculation)(m_graph.handle(n).pos(), m_graph.transitionLabel(n).pos(), 0.0);
       m_lforces[n] += f;
 
-      for (size_t m = 0; m < n; ++m)
+      for (size_t j = 0; j < i; ++j)
       {
+        size_t m = sel ? m_graph.selectionEdge(j) : j;
+
         // Handles
         f = repulsionForce(m_graph.handle(n).pos(), m_graph.handle(m).pos(), m_repulsion * m_controlPointWeight, m_natLength);
         m_hforces[n] += f;
@@ -169,8 +187,10 @@ namespace Graph
       }
     }
 
-    for (size_t n = 0; n < m_graph.nodeCount(); ++n)
+    for (size_t i = 0; i < nodeCount; ++i)
     {
+      size_t n = sel ? m_graph.selectionNode(i) : i;
+
       if (!m_graph.node(n).anchored())
       {
         m_graph.node(n).pos() = m_graph.node(n).pos() + m_nforces[n] * m_speed;
@@ -183,8 +203,10 @@ namespace Graph
       }
     }
 
-    for (size_t n = 0; n < m_graph.edgeCount(); ++n)
+    for (size_t i = 0; i < edgeCount; ++i)
     {
+      size_t n = sel ? m_graph.selectionEdge(i) : i;
+
       if (!m_graph.handle(n).anchored())
       {
         m_graph.handle(n).pos() = m_graph.handle(n).pos() + m_hforces[n] * m_speed;
@@ -196,12 +218,15 @@ namespace Graph
         m_graph.transitionLabel(n).pos().clip(m_clipMin, m_clipMax);
       }
     }
+
+    m_graph.unlock(); // exit critical section
   }
 
   void SpringLayout::setClipRegion(const Coord3D& min, const Coord3D& max)
   {
     if (min.z < m_clipMin.z || max.z > m_clipMax.z) //Depth is increased, add random z values to improve spring movement in z direction
     {
+      m_graph.lock();
       float change = (std::min)(m_clipMin.z-min.z, max.z-m_clipMax.z)/100.0f; //Add at most 1/100th of the change
       for (size_t n = 0; n < m_graph.nodeCount(); ++n)
       {
@@ -211,6 +236,7 @@ namespace Graph
         }
 
       }
+      m_graph.unlock();
     }
 
     m_clipMin = min;
