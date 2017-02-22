@@ -219,15 +219,16 @@ struct TextureData
 
 struct VertexData
 {
-    Coord3D *node, *handle, *arrowhead, *transition_labels, *state_labels, *number_labels;
+    Coord3D *node, *hint, *handle, *arrowhead, *transition_labels, *state_labels, *number_labels;
 
     VertexData()
-      : node(NULL), handle(NULL), arrowhead(NULL), transition_labels(NULL), state_labels(NULL), number_labels(NULL)
+      : node(NULL), hint(NULL), handle(NULL), arrowhead(NULL), transition_labels(NULL), state_labels(NULL), number_labels(NULL)
     { }
 
     ~VertexData()
     {
       delete[] node;
+      delete[] hint;
       delete[] handle;
       delete[] arrowhead;
       delete[] transition_labels;
@@ -244,6 +245,7 @@ struct VertexData
 
       // Delete old data
       delete[] node;
+      delete[] hint;
       delete[] handle;
       delete[] arrowhead;
       delete[] transition_labels;
@@ -279,6 +281,13 @@ struct VertexData
       }
       for (size_t i = 0; i < n; ++i)
         node[i] *= 0.5 * nodesize;
+
+      // Generate plus (and minus) hint for exploration mode
+      hint = new Coord3D[4];
+      hint[0] = Coord3D(-nodesize * 0.3, 0.0, 0.0);
+      hint[1] = Coord3D(nodesize * 0.3, 0.0, 0.0);
+      hint[2] = Coord3D(0.0, -nodesize * 0.3, 0.0);
+      hint[3] = Coord3D(0.0, nodesize * 0.3, 0.0);
 
       // Generate vertices for handle (border + fill, both squares)
       handle = new Coord3D[4];
@@ -649,6 +658,19 @@ void drawNode(const VertexData& data, const Color3f& line, const Color3f& fill, 
 }
 
 inline
+void drawHint(const VertexData& data, const Color4f& line, bool active)
+{
+  glPushAttrib(GL_LINE_BIT);
+  glLineWidth(2.5);
+  glVertexPointer(3, GL_FLOAT, 0, data.hint);
+  glDepthMask(GL_FALSE);
+  glColor4fv(line);
+  glDrawArrays(GL_LINES, 0, active ? 2 : 4); // Plus or half a plus (minus)
+  glDepthMask(GL_TRUE);
+  glPopAttrib();
+}
+
+inline
 void drawArrowHead(const VertexData& data)
 {
   glVertexPointer(3, GL_FLOAT, 0, data.arrowhead);
@@ -786,6 +808,7 @@ void GLScene::renderNode(GLuint i)
   Graph::NodeNode& node = m_graph.node(i);
   Color3f fill;
   Color3f line;
+  Color4f hint;
 
   // Node stroke color: red when selected, black otherwise
   line = Color3f(0.6f * node.selected(), 0.0f, 0.0f);
@@ -811,6 +834,15 @@ void GLScene::renderNode(GLuint i)
 
   m_camera->billboard_spherical(node.pos());
   drawNode(*m_vertexdata, line, fill, mark, m_graph.hasSelection() && !node.active());
+
+  if (m_graph.hasSelection() && node.selected() != 0.0 && !m_graph.isBridge(i))
+  {
+    float s = (fill.r < 0.5 && fill.g < 0.5 && fill.b < 0.5) ? 0.2f : -0.2f;
+    hint = Color4f(fill.r + s, fill.g + s, fill.b + s, node.selected());
+
+    glTranslatef(0, 0, m_size_node * m_camera->pixelsize);
+    drawHint(*m_vertexdata, hint, node.active());
+  }
 
   glPopMatrix();
   glEndName();
@@ -1017,30 +1049,14 @@ void GLScene::render()
 
   m_graph.lock(); // enter critical section
 
-  if (m_graph.hasSelection())
-  {
-    for (size_t i = 0; i < m_graph.selectionNodeCount(); ++i)
-    {
-      renderNode(m_graph.selectionNode(i));
-    }
-    for (size_t i = 0; i < m_graph.selectionEdgeCount(); ++i)
-    {
-      renderEdge(m_graph.selectionEdge(i));
-    }
-  }
-
   bool sel = m_graph.hasSelection();
   size_t nodeCount = sel ? m_graph.selectionNodeCount() : m_graph.nodeCount();
   size_t edgeCount = sel ? m_graph.selectionEdgeCount() : m_graph.edgeCount();
 
   for (size_t i = 0; i < nodeCount; ++i)
-  {
     renderNode(sel ? m_graph.selectionNode(i) : i);
-  }
   for (size_t i = 0; i < edgeCount; ++i)
-  {
     renderEdge(sel ? m_graph.selectionEdge(i) : i);
-  }
 
   glEnableClientState(GL_TEXTURE_COORD_ARRAY);
   glDepthMask(GL_FALSE);

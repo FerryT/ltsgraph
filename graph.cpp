@@ -8,6 +8,7 @@
 //
 
 #include <unordered_map>
+#include <unordered_set>
 
 #include <QDomDocument>
 #include <QTextStream>
@@ -242,10 +243,9 @@ namespace Graph
       {
         size_t id;    // index in the complete node list
         size_t index; // index in the selected node list
-        size_t outdepth;
-        size_t indepth;
         std::vector<size_t> inEdges, outEdges; // by edge id
         size_t count;
+        bool bridge;
         Node()=default;
       };
 
@@ -254,7 +254,6 @@ namespace Graph
         size_t id;    // index in the complete edge list
         size_t index; // index in the selected edge list
         size_t count;
-        bool bridge;
         Edge()=default;
       };
 
@@ -408,9 +407,274 @@ namespace Graph
         }
       }
 
+      // updates the bridge values of the edges
+      // algorithm based on http://dx.doi.org/10.1016/j.ipl.2013.01.016
       void updateBridges()
       {
-        // Todo: implement
+        if (m_nodeIndices.size() < 1) return;
+
+        struct NodeInfo
+        {
+          size_t id;
+          std::unordered_set<size_t> neighbors;
+          bool searched;
+          size_t parent;
+          std::unordered_set<size_t> backEdges;
+          bool visited;
+          bool leaf;
+          NodeInfo(size_t id = 0)
+            : id(id), searched(false), parent(id), visited(false), leaf(false) {}
+        };
+        struct EdgeInfo
+        {
+          size_t u, v;
+          EdgeInfo(size_t f, size_t t) : u(f < t ? f : t), v(f < t ? t : f) {}
+          bool operator ==(const EdgeInfo& e) const { return e.u == u && e.v == v; }
+        };
+        struct EdgeInfoHash
+        {
+          size_t operator()(const EdgeInfo& e) const
+          {
+            return std::hash<size_t>()(e.u) ^ (std::hash<size_t>()(e.v) << 1);
+          };
+        };
+        std::unordered_map<size_t,NodeInfo> nodes;
+        std::vector<size_t> order;
+        std::unordered_set<EdgeInfo,EdgeInfoHash> chains;
+
+        // generate simplified graph
+        {
+          std::stack<size_t> progress;
+          progress.push(m_nodeIndices[0]);
+          while (!progress.empty())
+          {
+            size_t nodeId = progress.top();
+            progress.pop();
+            if (nodes.count(nodeId)) continue;
+
+            nodes[nodeId] = NodeInfo(nodeId);
+            NodeInfo& nodeinfo = nodes[nodeId];
+            Node& node = m_nodes[nodeId];
+            for (size_t i = 0; i < node.outEdges.size(); ++i)
+            {
+              size_t edgeId = node.outEdges[i];
+              if (!m_edges.count(edgeId)) continue;
+              size_t otherId = m_impl->edges[edgeId].to();
+              if (nodeId == otherId || !m_nodes.count(otherId)) continue;
+              nodeinfo.neighbors.insert(otherId);
+              progress.push(otherId);
+            }
+            for (size_t i = 0; i < node.inEdges.size(); ++i)
+            {
+              size_t edgeId = node.inEdges[i];
+              if (!m_edges.count(edgeId)) continue;
+              size_t otherId = m_impl->edges[edgeId].from();
+              if (nodeId == otherId || !m_nodes.count(otherId)) continue;
+              nodeinfo.neighbors.insert(otherId);
+              progress.push(otherId);
+            }
+          }
+        }
+
+        // generate depth first search tree, find backedges
+        {
+          std::stack<size_t> progress;
+          progress.push(m_nodeIndices[0]);
+          while (!progress.empty())
+          {
+            size_t nodeId = progress.top();
+            progress.pop();
+            NodeInfo& node = nodes[nodeId];
+
+            if (node.searched) continue;
+            node.searched = true;
+            order.push_back(nodeId);
+
+            for (std::unordered_set<size_t>::iterator
+              it = node.neighbors.begin(); it != node.neighbors.end(); ++it)
+            {
+              size_t otherId = *it;
+              if (!nodes[otherId].searched) // node was not yet processed:
+              {
+                nodes[otherId].parent = nodeId;
+                progress.push(otherId);
+              }
+              else if (node.parent != otherId) // node was processed, backedge
+              {
+                nodes[otherId].backEdges.insert(nodeId);
+              }
+            }
+          }
+        }
+
+        // find chains
+        {
+          for (size_t i = 0; i < order.size(); ++i)
+          {
+            size_t nodeId = order[i];
+            NodeInfo& node = nodes[nodeId];
+            for (std::unordered_set<size_t>::iterator
+              it = node.backEdges.begin(); it != node.backEdges.end(); ++it)
+            {
+              size_t id = *it;
+              node.visited = true;
+              chains.insert(EdgeInfo(nodeId, id));
+              while (!nodes[id].visited)
+              {
+                nodes[id].visited = true;
+                chains.insert(EdgeInfo(id, nodes[id].parent));
+                id = nodes[id].parent;
+              }
+            }
+          }
+        }
+
+        // find leafs
+        {
+          for (size_t i = 0; i < order.size(); ++i)
+          {
+            size_t nodeId = order[i];
+            Node& node = m_nodes[nodeId];
+            NodeInfo& nodeinfo = nodes[nodeId];
+            if (m_impl->nodes[nodeId].active())
+            {
+              nodeinfo.leaf = false;
+              continue;
+            }
+            size_t count = 0;
+            for (size_t j = 0; j < node.inEdges.size(); ++j)
+              count += m_edges.count(node.inEdges[j]) ? 1 : 0;
+            for (size_t j = 0; j < node.outEdges.size(); ++j)
+              count += m_edges.count(node.outEdges[j]) ? 1 : 0;
+            nodeinfo.leaf = (count <= 1);
+          }
+        }
+
+        // find bridges
+        {
+          for (size_t i = 0; i < order.size(); ++i)
+          {
+            size_t nodeId = order[i];
+            Node& node = m_nodes[nodeId];
+            NodeInfo& nodeinfo = nodes[nodeId];
+            node.bridge = false;
+
+            std::unordered_set<size_t> connected;
+            size_t connections = 0;
+            for (size_t j = 0; j < node.inEdges.size(); ++j)
+            {
+              size_t edgeId = node.inEdges[j];
+              if (m_edges.count(edgeId))
+                connected.insert( m_impl->edges[edgeId].from());
+            }
+            for (size_t j = 0; j < node.outEdges.size(); ++j)
+            {
+              size_t edgeId = node.outEdges[j];
+              if (m_edges.count(edgeId) && m_edges[edgeId].count > 1)
+                connected.insert(m_impl->edges[edgeId].to());
+            }
+            size_t count = 0;
+            for (std::unordered_set<size_t>::iterator
+              it = nodeinfo.neighbors.begin(); it != nodeinfo.neighbors.end(); ++it)
+            {
+              size_t otherId = *it;
+              bool isLeaf = nodes[otherId].leaf;
+              bool isConnected = connected.count(otherId);
+              bool isChain = chains.count(EdgeInfo(nodeId,otherId));
+              if (!isLeaf)
+                ++connections;
+              if (!isLeaf && !isConnected && !isChain)
+                node.bridge = true;
+            }
+            if (connections <= 1)
+              node.bridge = false;
+          }
+        }
+
+        // debug tree
+        /*{
+          FILE* fp = fopen("selection.dot", "wt");
+          fputs("digraph {\n\tnode [shape=circle];\n", fp);
+          for (size_t i = 0; i < order.size(); ++i)
+          {
+            NodeInfo& node = nodes[order[i]];
+            const char *color = chains.count(EdgeInfo(node.id, node.parent)) ? "red" : "black";
+            fprintf(fp, "\t\"%d\"->\"%d\" [color=%s];\n", node.id, node.parent, color);
+            for (std::unordered_set<size_t>::iterator
+              it = node.backEdges.begin(); it != node.backEdges.end(); ++it)
+            {
+              const char *color = chains.count(EdgeInfo(node.id, *it)) ? "red" : "black";
+              fprintf(fp, "\t\"%d\"->\"%d\" [style=dashed,constraint=false,color=%s];\n", node.id, *it, color);
+            }
+            if (node.leaf)
+              fprintf(fp, "\t\"%d\" [style=dashed]\n", node.id);
+          }
+          fputs("}\n", fp);
+          fclose(fp);
+        }*/
+      }
+
+      // returns whether contracting this node will not leave orphans
+      // standard depth-first search algorithm
+      bool contractable(size_t nodeId)
+      {
+        Node& node = m_nodes[nodeId];
+        std::unordered_set<size_t> nedges; // removed edges
+        std::unordered_set<size_t> neighbors;
+        for (size_t i = 0; i < node.inEdges.size(); ++i)
+        {
+          size_t edgeId = node.inEdges[i];
+          if (m_edges.count(edgeId))
+          {
+            size_t otherId = m_impl->edges[edgeId].from();
+            if (m_nodes.count(otherId))
+              neighbors.insert(otherId);
+          }
+        }
+        for (size_t i = 0; i < node.outEdges.size(); ++i)
+        {
+          size_t edgeId = node.outEdges[i];
+          if (m_edges.count(edgeId))
+          {
+            if (m_edges[edgeId].count <= 1)
+              nedges.insert(edgeId);
+            size_t otherId = m_impl->edges[edgeId].to();
+            if (m_nodes.count(otherId) && m_nodes[otherId].count > 1)
+              neighbors.insert(otherId);
+          }
+        }
+        if (neighbors.size() <= 1)
+          return true;
+
+        std::stack<size_t> progress;
+        std::unordered_set<size_t> status;
+        progress.push(*neighbors.begin());
+        while (!progress.empty())
+        {
+          size_t nodeId = progress.top();
+          progress.pop();
+          if (status.count(nodeId)) continue;
+          status.insert(nodeId);
+
+          neighbors.erase(nodeId);
+          if (!neighbors.size())
+            return true;
+
+          Node& node = m_nodes[nodeId];
+          for (size_t i = 0; i < node.inEdges.size(); ++i)
+          {
+            size_t edgeId = node.inEdges[i];
+            if (m_edges.count(edgeId) && !nedges.count(edgeId))
+              progress.push(m_impl->edges[edgeId].from());
+          }
+          for (size_t i = 0; i < node.outEdges.size(); ++i)
+          {
+            size_t edgeId = node.outEdges[i];
+            if (m_edges.count(edgeId) && !nedges.count(edgeId))
+              progress.push(m_impl->edges[edgeId].to());
+          }
+        }
+        return false;
       }
 
     public:
@@ -447,26 +711,24 @@ namespace Graph
         updateBridges();
       }
 
-      // tells whether a node when contracted would leave unconnected components
+      // return true when contracting given node would leave unconnected parts
+      bool isContractable(size_t nodeId)
+      {
+        if (!m_nodes.count(nodeId))
+          return false;
+        bool value = contractable(nodeId);
+        if (!value)
+          m_nodes[nodeId].bridge = true;
+        return value;
+      }
+
+      // tells whether a node is part of a bridge (is a cut edge)
+      // slightly more lenient as isContractable but fast (false positives)
       bool isBridge(size_t nodeId)
       {
         if (!m_nodes.count(nodeId))
           return false;
-
-        // If one of the out-edges is a bridge and would unselect: true
-        /*Node &node = m_nodes[nodeId];
-        for (size_t i = 0; i < node.outEdges.size(); ++i)
-        {
-          size_t edgeId = node.outEdges[i];
-          if (m_edges.count(edgeId) != 0)
-          {
-            Edge &edge = m_edges[edgeId];
-            if (edge.bridge && edge.count <= 1)
-              return true;
-          }
-        }*/
-
-        return false;
+        return m_nodes[nodeId].bridge;
       }
   };
 
@@ -869,7 +1131,9 @@ namespace Graph
     if (m_sel != nullptr && index < m_impl->nodes.size())
     {
       NodeNode& node = m_impl->nodes[index];
-      if (node.m_active)
+      bool active = node.m_active;
+      node.m_active = !node.m_active;
+      if (active)
       {
         m_sel->contract(index);
       }
@@ -877,7 +1141,6 @@ namespace Graph
       {
         m_sel->expand(index);
       }
-      node.m_active = !node.m_active;
     }
 
     m_lock.unlock(); // exit critical section
@@ -891,13 +1154,14 @@ namespace Graph
     m_lock.lockForRead();
 
     // active node count:
+    // Todo: improve this
     size_t count = 0;
     for (size_t i = 0; i < m_sel->nodes.size(); ++i)
       if (m_impl->nodes[m_sel->nodes[i]].m_active)
         ++count;
     
     NodeNode& node = m_impl->nodes[index];
-    bool toggleable = !node.m_active || (!m_sel->isBridge(index) && count > 1);
+    bool toggleable = !node.m_active || (m_sel->isContractable(index) && count > 1);
 
     m_lock.unlock();
 
