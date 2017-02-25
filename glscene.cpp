@@ -47,7 +47,7 @@ struct GLHitRecord
     GLuint stackSize;
     GLuint minDepth;
     GLuint maxDepth;
-    GLuint stack[0];
+    GLuint stack[1];
 };
 
 struct Color3f
@@ -109,22 +109,23 @@ struct TextureData
   float pixelsize;
 
   TextureData(float device_pixel_ratio, float pixelsize)
-      : font(), graph(nullptr), transitions(nullptr), states(nullptr), numbers(nullptr), labels(),
-        device_pixel_ratio(device_pixel_ratio), pixelsize(pixelsize) {}
+    : font(), graph(nullptr), transitions(nullptr), states(nullptr), numbers(nullptr), labels(),
+      device_pixel_ratio(device_pixel_ratio), pixelsize(pixelsize)
+  { }
 
-  ~TextureData()
+  void clear()
   {
-    clearTextures();
-  }
-
-  void clearTextures()
-  {
-    delete[] transitions;
-    delete[] states;
-    delete[] numbers;
+    delete[] transitions; transitions = nullptr;
+    delete[] states;      states      = nullptr;
+    delete[] numbers;     numbers     = nullptr;
     for (QHash<QString,Texture*>::iterator it = labels.begin(); it != labels.end(); ++it)
       delete it.value();
     labels.clear();
+  }
+
+  ~TextureData()
+  {
+    clear();
   }
 
   void createTexture(QString labelstring, Texture*& texture)
@@ -204,7 +205,7 @@ struct TextureData
 
   void generate(Graph::Graph& g)
   {
-    clearTextures();
+    clear();
 
     g.lock(); // enter critical section
 
@@ -235,12 +236,17 @@ struct VertexData
       : node(nullptr), hint(nullptr), handle(nullptr), arrowhead(nullptr)
     { }
 
+    void clear()
+    {
+      delete[] node;      node      = nullptr;
+      delete[] hint;      hint      = nullptr;
+      delete[] handle;    handle    = nullptr;
+      delete[] arrowhead; arrowhead = nullptr;
+    }
+
     ~VertexData()
     {
-      delete[] node;
-      delete[] hint;
-      delete[] handle;
-      delete[] arrowhead;
+      clear();
     }
 
     void generate(const TextureData& textures, float pixelsize, float size_node)
@@ -251,14 +257,11 @@ struct VertexData
           arrowheadsize = SIZE_ARROWHEAD * pixelsize * textures.device_pixel_ratio;
 
       // Delete old data
-      delete[] node;
-      delete[] hint;
-      delete[] handle;
-      delete[] arrowhead;
+      clear();
 
       // Generate vertices for node border (a line loop drawing a circle)
-      float slice = 0, sliced = 2.0f * M_PI / (RES_NODE_SLICE - 1),
-          stack = 0, stackd = M_PI_2 / RES_NODE_STACK;
+      float slice = 0, sliced = (float) (2.0 * M_PI / (RES_NODE_SLICE - 1)),
+          stack = 0, stackd = (float) (M_PI_2 / RES_NODE_STACK);
       node = new Coord3D[RES_NODE_SLICE - 1 + RES_NODE_SLICE * RES_NODE_STACK * 2];
       for (int i = 0; i < RES_NODE_SLICE - 1; ++i, slice += sliced)
         node[i] = Coord3D(sin(slice), cos(slice), 0.1f);
@@ -303,7 +306,7 @@ struct VertexData
       // Generate vertices for arrowhead (a triangle fan drawing a cone)
       arrowhead = new Coord3D[RES_ARROWHEAD + 1];
       arrowhead[0] = Coord3D(-nodesize / 2.0, 0.0, 0.0);
-      float diff = M_PI / 20.0f, t = 0;
+      float diff = (float) (M_PI / 20.0), t = 0;
       for (int i = 1; i < RES_ARROWHEAD; ++i, t += diff)
         arrowhead[i] = Coord3D(-nodesize / 2.0 - arrowheadsize,
                                0.3 * arrowheadsize * sin(t),
@@ -594,7 +597,7 @@ void drawNode(const VertexData& data, const Color3f& line, const Color3f& fill, 
   glVertexPointer(3, GL_FLOAT, 0, data.node);
   if (translucent)
   {
-    Color4f fill2(fill, .15);
+    Color4f fill2(fill, .15f);
     glColor4fv(fill2);
   }
   else
@@ -607,7 +610,7 @@ void drawNode(const VertexData& data, const Color3f& line, const Color3f& fill, 
   
   if (translucent)
   {
-    Color4f line2(line, .15);
+    Color4f line2(line, .15f);
     glColor4fv(line2);
   }
   else
