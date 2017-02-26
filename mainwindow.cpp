@@ -184,6 +184,7 @@ void MainWindow::openFile(QString fileName)
       m_glwidget->resume();
       m_information->update();
       setWindowTitle(QString("LTSGraph - ") + fileName);
+      m_graph.setStable(false);
     }
     catch (mcrl2::runtime_error e)
     {
@@ -252,6 +253,7 @@ void MainWindow::onImportXML()
     onExplore(hadSelection);
     m_glwidget->rebuild();
     m_information->update();
+    m_graph.setStable(false);
   }
 
 }

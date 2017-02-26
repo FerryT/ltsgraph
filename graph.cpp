@@ -732,7 +732,29 @@ namespace Graph
       }
   };
 
-  Graph::Graph() : m_sel(nullptr), m_lock(QReadWriteLock::Recursive)
+  #ifndef DEBUG_GRAPH_LOCKS
+    #define GRAPH_LOCK(type, where, x) x
+  #else
+    #define GRAPH_LOCK(type, where, x) do { debug_lock(type, where); x; \
+                                            debug_lock(type"ed", where); } while (false)
+    void debug_lock(const char* type, const char* func)
+    {
+      static int count = 0;
+      static std::unordered_map<Qt::HANDLE,int> ids;
+      Qt::HANDLE id = QThread::currentThreadId();
+      if (!ids.count(id))
+        ids[id] = ++count;
+      printf("[%d] %s at %s\n", ids[id], type, func);
+      fflush(stdout);
+    }
+  #endif
+
+  #define lockForRead(lock, where)    GRAPH_LOCK("lock", where, lock.lockForRead())
+  #define unlockForRead(lock, where)  GRAPH_LOCK("unlock", where, lock.unlock())
+  #define lockForWrite(lock, where)   GRAPH_LOCK("W lock", where, lock.lockForWrite())
+  #define unlockForWrite(lock, where) GRAPH_LOCK("W unlock", where, lock.unlock())
+
+  Graph::Graph() : m_sel(nullptr), m_lock(), m_stable(true)
   {
     m_type = mcrl2::lts::lts_lts;
     m_impl = new detail::GraphImpl<mcrl2::lts::probabilistic_lts_lts_t>;
@@ -806,7 +828,7 @@ namespace Graph
 
   void Graph::load(const QString &filename, const Coord3D& min, const Coord3D& max)
   {
-    m_lock.lockForWrite();
+    lockForWrite(m_lock, GRAPH_LOCK_TRACE);
 
     mcrl2::lts::lts_type guess = mcrl2::lts::detail::guess_format(filename.toUtf8().constData());
     delete m_impl;
@@ -817,13 +839,14 @@ namespace Graph
       delete m_sel;
       m_sel = nullptr;
     }
+    m_stable = true;
 
-    m_lock.unlock();
+    unlockForWrite(m_lock, GRAPH_LOCK_TRACE);
   }
 
   void Graph::loadXML(const QString& filename)
   {
-    m_lock.lockForWrite();
+    lockForWrite(m_lock, GRAPH_LOCK_TRACE);
 
     QDomDocument xml;
     QFile file(filename);
@@ -938,13 +961,14 @@ namespace Graph
       delete m_sel;
       m_sel = nullptr;
     }
+    m_stable = true;
 
-    m_lock.unlock();
+    unlockForWrite(m_lock, GRAPH_LOCK_TRACE);
   }
 
   void Graph::saveXML(const QString& filename)
   {
-    m_lock.lockForRead();
+    lockForRead(m_lock, GRAPH_LOCK_TRACE);
 
     QDomDocument xml;
     QDomElement root = xml.createElement("Graph");
@@ -1032,7 +1056,7 @@ namespace Graph
 
     // Todo: Perhaps save selection too
 
-    m_lock.unlock();
+    unlockForRead(m_lock, GRAPH_LOCK_TRACE);
   }
 
   Edge Graph::edge(size_t index) const
@@ -1076,27 +1100,43 @@ namespace Graph
 
   void Graph::clip(const Coord3D& min, const Coord3D& max)
   {
+    lockForRead(m_lock, GRAPH_LOCK_TRACE); // read lock because indices are not invalidated
+
     for (std::vector<NodeNode>::iterator it = m_impl->nodes.begin(); it != m_impl->nodes.end(); ++it)
       it->pos().clip(min, max);
     for (std::vector<LabelNode>::iterator it = m_impl->transitionLabelnodes.begin(); it != m_impl->transitionLabelnodes.end(); ++it)
       it->pos().clip(min, max);
     for (std::vector<Node>::iterator it = m_impl->handles.begin(); it != m_impl->handles.end(); ++it)
       it->pos().clip(min, max);
+
+    unlockForRead(m_lock, GRAPH_LOCK_TRACE);
   }
 
   void Graph::lock()
   {
-    m_lock.lockForRead();
+    lockForRead(m_lock, GRAPH_LOCK_TRACE);
   }
 
   void Graph::unlock()
   {
-    m_lock.unlock();
+    unlockForRead(m_lock, GRAPH_LOCK_TRACE);
   }
+
+  #ifdef DEBUG_GRAPH_LOCKS
+    void Graph::lock(const char* where)
+    {
+      lockForRead(m_lock, where);
+    }
+
+    void Graph::unlock(const char* where)
+    {
+      unlockForRead(m_lock, where);
+    }
+  #endif
 
   void Graph::makeSelection()
   {
-    m_lock.lockForWrite();
+    lockForWrite(m_lock, GRAPH_LOCK_TRACE);
 
     if (m_sel != nullptr)
     {
@@ -1104,12 +1144,12 @@ namespace Graph
     }
     m_sel = new Selection(m_impl);
 
-    m_lock.unlock();
+    unlockForWrite(m_lock, GRAPH_LOCK_TRACE);
   }
 
   void Graph::discardSelection()
   {
-    m_lock.lockForWrite();
+    lockForWrite(m_lock, GRAPH_LOCK_TRACE);
 
     if (m_sel != nullptr)
     {
@@ -1121,12 +1161,12 @@ namespace Graph
     for (std::vector<NodeNode>::iterator it = m_impl->nodes.begin(); it != m_impl->nodes.end(); ++it)
       it->m_active = false;
 
-    m_lock.unlock();
+    unlockForWrite(m_lock, GRAPH_LOCK_TRACE);
   }
 
   void Graph::toggleActive(size_t index)
   {
-    m_lock.lockForWrite(); // enter critical section
+    lockForWrite(m_lock, GRAPH_LOCK_TRACE);
 
     if (m_sel != nullptr && index < m_impl->nodes.size())
     {
@@ -1143,7 +1183,7 @@ namespace Graph
       }
     }
 
-    m_lock.unlock(); // exit critical section
+    unlockForWrite(m_lock, GRAPH_LOCK_TRACE);
   }
 
   bool Graph::isToggleable(size_t index)
@@ -1151,7 +1191,7 @@ namespace Graph
     if (m_sel == nullptr || index >= m_impl->nodes.size())
       return false;
 
-    m_lock.lockForRead();
+    lockForRead(m_lock, GRAPH_LOCK_TRACE);
 
     // active node count:
     // Todo: improve this
@@ -1163,9 +1203,18 @@ namespace Graph
     NodeNode& node = m_impl->nodes[index];
     bool toggleable = !node.m_active || (m_sel->isContractable(index) && count > 1);
 
-    m_lock.unlock();
+    unlockForRead(m_lock, GRAPH_LOCK_TRACE);
 
     return toggleable;
+  }
+
+  void Graph::setStable(bool stable)
+  {
+    lockForRead(m_lock, GRAPH_LOCK_TRACE);
+
+    m_stable = stable;
+
+    unlockForRead(m_lock, GRAPH_LOCK_TRACE);
   }
 
   bool Graph::isBridge(size_t index) const

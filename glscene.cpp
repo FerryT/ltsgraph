@@ -207,13 +207,13 @@ struct TextureData
   {
     clear();
 
-    g.lock(); // enter critical section
+    g.lock(GRAPH_LOCK_TRACE); // enter critical section
 
     size_t transition_count = g.transitionLabelCount();
     size_t state_count = g.stateLabelCount();
     size_t number_count = g.nodeCount();
 
-    g.unlock(); // exit critical section
+    g.unlock(GRAPH_LOCK_TRACE); // exit critical section
 
     graph = &g;
     transitions = new Texture*[transition_count]();
@@ -1026,7 +1026,7 @@ void GLScene::render()
 
   glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-  m_graph.lock(); // enter critical section
+  m_graph.lock(GRAPH_LOCK_TRACE); // enter critical section
 
   bool sel = m_graph.hasSelection();
   size_t nodeCount = sel ? m_graph.selectionNodeCount() : m_graph.nodeCount();
@@ -1055,7 +1055,7 @@ void GLScene::render()
   glDepthMask(GL_TRUE);
   glDisableClientState(GL_TEXTURE_COORD_ARRAY);
 
-  m_graph.unlock(); // exit critical section
+  m_graph.unlock(GRAPH_LOCK_TRACE); // exit critical section
 }
 
 void GLScene::resize(size_t width, size_t height)
@@ -1257,7 +1257,7 @@ void GLScene::renderLatexGraphics(QString filename, float aspectRatio)
   tikz_code += "   \\tikzstyle{initstate}=[state,fill=green]\n";
   tikz_code += "   \\tikzstyle{transition}=[->,>=stealth']\n";
 
-  m_graph.lock();
+  m_graph.lock(GRAPH_LOCK_TRACE);
 
   bool sel = m_graph.hasSelection();
   size_t nodeCount = sel ? m_graph.selectionNodeCount() : m_graph.nodeCount();
@@ -1273,7 +1273,7 @@ void GLScene::renderLatexGraphics(QString filename, float aspectRatio)
     tikz_code += tikzEdge(sel ? m_graph.selectionEdge(i) : i, aspectRatio);
   }
 
-  m_graph.unlock();
+  m_graph.unlock(GRAPH_LOCK_TRACE);
 
   tikz_code += "\n\\end{tikzpicture}\n";
   tikz_code += "\\end{document}\n";

@@ -474,6 +474,7 @@ namespace Graph
       mcrl2::lts::lts_type m_type;    ///< The type of the current graph.
       QString m_empty;                ///< Empty string that is returned as label if none present.
       QReadWriteLock m_lock;          ///< Lock protecting the structure from being changed while rendering and simulating
+      bool m_stable;                  ///< When true, the graph is considered stable, spring forces should not be applied.
 
 
       /**
@@ -501,6 +502,13 @@ namespace Graph
        */
       void unlock();
 
+      #ifndef DEBUG_GRAPH_LOCKS
+        #define GRAPH_LOCK_TRACE
+      #else
+        void lock(const char* where);
+        void unlock(const char* where);
+        #define GRAPH_LOCK_TRACE __func__
+      #endif
 
       /**
        * @brief Loads a graph with random positioning for the nodes.
@@ -522,6 +530,13 @@ namespace Graph
        */
       void saveXML(const QString& filename);
 
+      /**
+       * @brief Restrains all nodes of the graph between @e min and @e max.
+       * @param min The minimum coordinates for any node.
+       * @param max The maximum coordinates for any node.
+       */
+      void clip(const Coord3D& min, const Coord3D& max);
+
       void makeSelection(); ///< Creates a new empty selection (overwriting existing).
       void discardSelection(); ///< Discards the current selection (when present).
       
@@ -537,6 +552,8 @@ namespace Graph
        * @param index The index of the node.
        */
       bool isToggleable(size_t index);
+
+      void setStable(bool stable); ///< @brief Sets whether this graph is stable. (guarded)
 
       /*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*
        ! The operations below this note are unguarded, lock before use!  !
@@ -555,13 +572,6 @@ namespace Graph
        * @param labelindex The index of the label.
        */
       const QString& stateLabelstring(size_t labelindex) const;
-
-      /**
-       * @brief Restrains all nodes of the graph between @e min and @e max.
-       * @param min The minimum coordinates for any node.
-       * @param max The maximum coordinates for any node.
-       */
-      void clip(const Coord3D& min, const Coord3D& max);
 
       // Getters and setters
       Edge edge(size_t index) const;
@@ -583,8 +593,16 @@ namespace Graph
       size_t selectionNode(size_t index) const; ///< Returns the node index for a certain node in the selection
       size_t selectionEdgeCount() const;        ///< Returns the number of edges in the selection
       size_t selectionNodeCount() const;        ///< Returns the number of nodes in the selection
-  };
 
+      const bool& stable() const ///< @brief Gets whether this graph is stable.
+      {
+        return m_stable;
+      }
+      bool& stable() ///< @brief Sets whether this graph is stable.
+      {
+        return m_stable;
+      }
+  };
 }
 
 #endif // GRAPH_H
